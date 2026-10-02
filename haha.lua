@@ -150,7 +150,7 @@ function Gecko:_register()
         return data.token
     end
     if status == 409 then
-        self:_log(player.Name .. " is already registered; rotate the token and provide it via Gecko.start({token=...})")
+        self:_log(player.Name .. " is already registered; rotate the token and provide it via Gecko:start({token=...})")
     else
         self:_log("Registration failed: " .. tostring(status))
     end
@@ -162,30 +162,30 @@ function Gecko:_log(...)
     fn(...)
 end
 
-function Gecko.setState(fields)
+function Gecko:setState(fields)
     if type(fields) ~= "table" then return end
     for k, v in pairs(fields) do
         self.state[k] = v
     end
 end
 
-function Gecko.on(command, handler)
+function Gecko:on(command, handler)
     self.handlers[command] = handler
 end
 
-function Gecko.isCoordinated()
+function Gecko:isCoordinated()
     return self.coordination ~= nil and self.coordination.mode == "coordinated"
 end
 
-function Gecko.shouldWait()
-    return self.isCoordinated() and self.state.ready == true
+function Gecko:shouldWait()
+    return self:isCoordinated() and self.state.ready == true
 end
 
-function Gecko.isRunning()
+function Gecko:isRunning()
     return self._running
 end
 
-function Gecko.event(event, message, details, level)
+function Gecko:event(event, message, details, level)
     if not self.token or not self._running then return end
     local body = {
         event   = event,
@@ -258,7 +258,7 @@ function Gecko:_sendState()
     return status, ack
 end
 
-function Gecko.flush()
+function Gecko:flush()
     if not self._running then return end
     task.spawn(function() self:_sendState() end)
 end
@@ -272,7 +272,7 @@ function Gecko:_startHeartbeat()
             if status == 200 then
                 failures = 0
             elseif status == 401 then
-                self:_log("Token rejected (rotated or deleted). Set a new token via Gecko.start({token=...}).")
+                self:_log("Token rejected (rotated or deleted). Set a new token via Gecko:start({token=...}).")
                 self.coordination = nil
                 self._running = false
                 break
@@ -289,12 +289,12 @@ function Gecko:_startHeartbeat()
     end)
 end
 
-function Gecko.stop()
+function Gecko:stop()
     self._running = false
     self.coordination = nil
 end
 
-function Gecko.start(userConfig)
+function Gecko:start(userConfig)
     if self._running and not (type(userConfig) == "table" and userConfig.reconfigure == true) then
         return self
     end
