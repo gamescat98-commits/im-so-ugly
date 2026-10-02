@@ -6,16 +6,18 @@ local genv = (getgenv and getgenv()) or _G
 local Gecko = {}
 Gecko.__index = Gecko
 
-Gecko.sessionId    = HttpService:GenerateGUID(false)
-Gecko.state        = { client_status = "running" }
-Gecko.coordination = nil
-Gecko.handlers     = {}
-Gecko.token        = nil
-Gecko.interval     = 5
-Gecko.config       = nil
-Gecko._running     = false
-Gecko._loopThread  = nil
-Gecko._http        = nil
+Gecko.sessionId         = HttpService:GenerateGUID(false)
+Gecko.state             = { client_status = "running" }
+Gecko.coordination      = nil
+Gecko.host_link         = nil
+Gecko.handlers          = {}
+Gecko.token             = nil
+Gecko.interval          = 5
+Gecko.config            = nil
+Gecko._running          = false
+Gecko._loopThread       = nil
+Gecko._http             = nil
+Gecko.first_ack_received = false
 
 local DEFAULT_TOKEN_DIR = "gecko"
 
@@ -54,9 +56,7 @@ local function validateConfig(cfg)
 
     local apiUrl = cfg.apiUrl
     assert(type(apiUrl) == "string" and apiUrl ~= "", "Gecko.start: apiUrl is required")
-    if apiUrl:sub(-1) == "/" then
-        apiUrl = apiUrl:sub(1, -2)
-    end
+    if apiUrl:sub(-1) == "/" then apiUrl = apiUrl:sub(1, -2) end
     assert(apiUrl:match("^https?://"), "Gecko.start: apiUrl must start with http:// or https://")
 
     local token         = cfg.token
@@ -185,6 +185,35 @@ function Gecko:isRunning()
     return self._running
 end
 
+function Gecko:isGrouped()
+    return self.host_link ~= nil and self.host_link.group_id ~= nil
+end
+
+function Gecko:isHost()
+    return self.host_link ~= nil and self.host_link.role == "host"
+end
+
+function Gecko:isFollower()
+    return self.host_link ~= nil and self.host_link.role == "follower"
+end
+
+function Gecko:getCoordination()
+    return self.coordination
+end
+
+function Gecko:getHostLink()
+    return self.host_link
+end
+
+function Gecko:publishHost(jobId, placeId)
+    if not self.token or not self._running then return false end
+    if type(jobId) ~= "string" or jobId == "" then return false end
+    local body = { job_id = jobId }
+    if placeId then body.place_id = placeId end
+    local status = self:_httpCall("POST", "/accounts/host/publish", self.token, body)
+    return status == 200
+end
+
 function Gecko:event(event, message, details, level)
     if not self.token or not self._running then return end
     local body = {
@@ -213,7 +242,7 @@ function Gecko:_runCommand(cmd)
     local handler = self.handlers[cmd.command_type]
     local body
     if not handler then
-        body = { success = false, error = "unknown command" }
+        body = { success = false, error = "unknown command: " .. tostring(cmd.command_type) }
     else
         local ok, result = pcall(handler, cmd.parameters or {})
         if ok then
@@ -249,8 +278,10 @@ function Gecko:_sendState()
     _sending = false
 
     if status == 200 and ack then
-        self.interval = tonumber(ack.heartbeat_interval_seconds) or self.interval
+        self.first_ack_received = true
+        self.interval     = tonumber(ack.heartbeat_interval_seconds) or self.interval
         self.coordination = ack.coordination
+        self.host_link    = ack.host_coordination
         if (tonumber(ack.pending_commands) or 0) > 0 then
             task.spawn(function() self:_pollCommands() end)
         end
@@ -274,6 +305,7 @@ function Gecko:_startHeartbeat()
             elseif status == 401 then
                 self:_log("Token rejected (rotated or deleted). Set a new token via Gecko:start({token=...}).")
                 self.coordination = nil
+                self.host_link    = nil
                 self._running = false
                 break
             else
@@ -292,6 +324,7 @@ end
 function Gecko:stop()
     self._running = false
     self.coordination = nil
+    self.host_link    = nil
 end
 
 function Gecko:start(userConfig)
@@ -311,6 +344,7 @@ function Gecko:start(userConfig)
     self._http    = resolveHttp(cfg.httpFn)
     self.interval = cfg.defaultInterval
     self._running = true
+    self.first_ack_received = false
 
     genv.Gecko = self
 
