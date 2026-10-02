@@ -6,17 +6,17 @@ local genv = (getgenv and getgenv()) or _G
 local Gecko = {}
 Gecko.__index = Gecko
 
-Gecko.sessionId         = HttpService:GenerateGUID(false)
-Gecko.state             = { client_status = "running" }
-Gecko.coordination      = nil
-Gecko.host_link         = nil
-Gecko.handlers          = {}
-Gecko.token             = nil
-Gecko.interval          = 5
-Gecko.config            = nil
-Gecko._running          = false
-Gecko._loopThread       = nil
-Gecko._http             = nil
+Gecko.sessionId          = HttpService:GenerateGUID(false)
+Gecko.state              = { client_status = "running" }
+Gecko.coordination       = nil
+Gecko.host_link          = nil
+Gecko.handlers           = {}
+Gecko.token              = nil
+Gecko.interval           = 5
+Gecko.config             = nil
+Gecko._running           = false
+Gecko._loopThread        = nil
+Gecko._http              = nil
 Gecko.first_ack_received = false
 
 local DEFAULT_TOKEN_DIR = "gecko"
@@ -324,7 +324,7 @@ end
 function Gecko:stop()
     self._running = false
     self.coordination = nil
-    self.host_link    = nil
+    self.host_link = nil
 end
 
 function Gecko:start(userConfig)
