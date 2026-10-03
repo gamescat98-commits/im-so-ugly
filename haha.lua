@@ -9,7 +9,7 @@ Gecko.__index = Gecko
 Gecko.sessionId          = HttpService:GenerateGUID(false)
 Gecko.state              = { client_status = "running" }
 Gecko.coordination       = nil
-Gecko.host_link          = nil
+Gecko.group              = nil
 Gecko.handlers           = {}
 Gecko.token              = nil
 Gecko.interval           = 5
@@ -18,6 +18,7 @@ Gecko._running           = false
 Gecko._loopThread        = nil
 Gecko._http              = nil
 Gecko.first_ack_received = false
+Gecko._processedCommands = {}
 
 local DEFAULT_TOKEN_DIR = "gecko"
 
@@ -107,7 +108,11 @@ function Gecko:_httpCall(method, path, token, body)
     if res.Body and #res.Body > 0 then
         pcall(function() decoded = HttpService:JSONDecode(res.Body) end)
     end
-    return res.StatusCode, decoded
+    local retryAfter = nil
+    if type(res.Headers) == "table" then
+        retryAfter = res.Headers["Retry-After"] or res.Headers["retry-after"]
+    end
+    return res.StatusCode, decoded, retryAfter
 end
 
 function Gecko:_tokenFilePath()
@@ -173,45 +178,16 @@ function Gecko:on(command, handler)
     self.handlers[command] = handler
 end
 
-function Gecko:isCoordinated()
-    return self.coordination ~= nil and self.coordination.mode == "coordinated"
-end
-
-function Gecko:shouldWait()
-    return self:isCoordinated() and self.state.ready == true
-end
-
 function Gecko:isRunning()
     return self._running
 end
 
 function Gecko:isGrouped()
-    return self.host_link ~= nil and self.host_link.group_id ~= nil
-end
-
-function Gecko:isHost()
-    return self.host_link ~= nil and self.host_link.role == "host"
-end
-
-function Gecko:isFollower()
-    return self.host_link ~= nil and self.host_link.role == "follower"
+    return self.group ~= nil and self.group.group_id ~= nil
 end
 
 function Gecko:getCoordination()
     return self.coordination
-end
-
-function Gecko:getHostLink()
-    return self.host_link
-end
-
-function Gecko:publishHost(jobId, placeId)
-    if not self.token or not self._running then return false end
-    if type(jobId) ~= "string" or jobId == "" then return false end
-    local body = { job_id = jobId }
-    if placeId then body.place_id = placeId end
-    local status = self:_httpCall("POST", "/accounts/host/publish", self.token, body)
-    return status == 200
 end
 
 function Gecko:event(event, message, details, level)
@@ -236,8 +212,15 @@ function Gecko:_pollCommands()
 end
 
 function Gecko:_runCommand(cmd)
+    if not cmd or not cmd.id then return end
+    if self._processedCommands[cmd.id] then return end
+
     local ack = self:_httpCall("POST", "/accounts/commands/" .. cmd.id .. "/ack", self.token)
     if ack ~= 200 then return end
+
+    -- Ack succeeded. Mark processed BEFORE running the handler so a
+    -- re-delivered copy of the same ID cannot execute twice locally.
+    self._processedCommands[cmd.id] = true
 
     local handler = self.handlers[cmd.command_type]
     local body
@@ -274,19 +257,19 @@ function Gecko:_sendState()
     for k, v in pairs(self.state) do
         body[k] = v
     end
-    local status, ack = self:_httpCall("POST", "/accounts/status", self.token, body)
+    local status, ack, retryAfter = self:_httpCall("POST", "/accounts/status", self.token, body)
     _sending = false
 
     if status == 200 and ack then
         self.first_ack_received = true
         self.interval     = tonumber(ack.heartbeat_interval_seconds) or self.interval
         self.coordination = ack.coordination
-        self.host_link    = ack.host_coordination
+        self.group        = ack.group
         if (tonumber(ack.pending_commands) or 0) > 0 then
             task.spawn(function() self:_pollCommands() end)
         end
     end
-    return status, ack
+    return status, ack, retryAfter
 end
 
 function Gecko:flush()
@@ -299,22 +282,34 @@ function Gecko:_startHeartbeat()
     self._loopThread = task.spawn(function()
         local failures = 0
         while self._running do
-            local status = self:_sendState()
+            local status, _, retryAfter = self:_sendState()
+            local wait_s
             if status == 200 then
                 failures = 0
+                wait_s = self.interval
             elseif status == 401 then
                 self:_log("Token rejected (rotated or deleted). Set a new token via Gecko:start({token=...}).")
                 self.coordination = nil
-                self.host_link    = nil
+                self.group        = nil
                 self._running = false
                 break
+            elseif status == 429 then
+                failures = failures + 1
+                local n = tonumber(retryAfter)
+                if not n or n < 1 or n > 300 then
+                    n = math.min(self.interval * math.max(1, failures), 60)
+                end
+                wait_s = n
+                if failures == 1 or failures % 12 == 0 then
+                    self:_log("Rate limited (429); retrying in " .. tostring(wait_s) .. "s")
+                end
             else
                 failures = failures + 1
                 if failures == 1 or failures % 12 == 0 then
                     self:_log("Heartbeat failed (" .. tostring(status) .. "); retrying")
                 end
+                wait_s = math.min(self.interval * math.max(1, failures), 60)
             end
-            local wait_s = math.min(self.interval * math.max(1, failures), 60)
             task.wait(wait_s)
         end
         self._loopThread = nil
@@ -324,7 +319,7 @@ end
 function Gecko:stop()
     self._running = false
     self.coordination = nil
-    self.host_link = nil
+    self.group = nil
 end
 
 function Gecko:start(userConfig)
